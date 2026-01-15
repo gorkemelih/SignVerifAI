@@ -1,6 +1,6 @@
 """Evaluation module for SignVerify.
 
-Handles model evaluation on test set with metrics and visualization.
+Handles model evaluation on test set with comprehensive metrics and visualization.
 """
 
 from dataclasses import asdict
@@ -11,6 +11,7 @@ from typing import Optional
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from sklearn.metrics import confusion_matrix as sk_confusion_matrix
 from sklearn.metrics import roc_curve
 from torch.utils.data import DataLoader
 
@@ -89,12 +90,13 @@ def plot_roc_curve(
     y_true: np.ndarray,
     y_scores: np.ndarray,
     output_path: Path,
+    auc_value: float,
 ) -> None:
     """Generate and save ROC curve plot."""
     fpr, tpr, _ = roc_curve(y_true, y_scores)
     
     plt.figure(figsize=(8, 8))
-    plt.plot(fpr, tpr, "b-", linewidth=2, label="ROC Curve")
+    plt.plot(fpr, tpr, "b-", linewidth=2, label=f"ROC Curve (AUC={auc_value:.4f})")
     plt.plot([0, 1], [0, 1], "r--", linewidth=1, label="Random")
     plt.xlabel("False Positive Rate (FAR)")
     plt.ylabel("True Positive Rate (1 - FRR)")
@@ -144,11 +146,47 @@ def plot_score_distribution(
     logger.info(f"Score distribution saved to {output_path}")
 
 
+def plot_confusion_matrix(
+    metrics: VerificationMetrics,
+    output_path: Path,
+) -> None:
+    """Generate and save confusion matrix plot."""
+    cm = np.array([[metrics.tn, metrics.fp], [metrics.fn, metrics.tp]])
+    
+    plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+    plt.title('Confusion Matrix @ EER Threshold')
+    plt.colorbar()
+    
+    classes = ['Impostor', 'Genuine']
+    tick_marks = np.arange(len(classes))
+    plt.xticks(tick_marks, classes)
+    plt.yticks(tick_marks, classes)
+    
+    # Add text annotations
+    thresh = cm.max() / 2.
+    for i in range(2):
+        for j in range(2):
+            plt.text(j, i, format(cm[i, j], 'd'),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black",
+                    fontsize=14)
+    
+    plt.ylabel('Actual')
+    plt.xlabel('Predicted')
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    
+    logger.info(f"Confusion matrix saved to {output_path}")
+
+
 def generate_eval_report(
     metrics: VerificationMetrics,
     output_dir: Path,
     roc_path: Path,
     dist_path: Path,
+    cm_path: Path,
 ) -> Path:
     """Generate evaluation report in Markdown and JSON."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -160,6 +198,8 @@ def generate_eval_report(
 
 ## Metrics Summary
 
+### Core Metrics
+
 | Metric | Value |
 |--------|-------|
 | **AUC-ROC** | {metrics.auc:.4f} |
@@ -168,18 +208,44 @@ def generate_eval_report(
 | **FAR @ FRR=1%** | {metrics.far_at_frr_01:.4f} |
 | **FAR @ FRR=10%** | {metrics.far_at_frr_1:.4f} |
 
-## ROC Curve
+### Classification Metrics (at EER threshold)
+
+| Metric | Value |
+|--------|-------|
+| **F1 Score** | {metrics.f1:.4f} |
+| **Precision** | {metrics.precision:.4f} |
+| **Recall** | {metrics.recall:.4f} |
+| **Sensitivity (TPR)** | {metrics.sensitivity:.4f} |
+| **Specificity (TNR)** | {metrics.specificity:.4f} |
+| **Accuracy** | {metrics.accuracy:.4f} |
+| **Balanced Accuracy** | {metrics.balanced_accuracy:.4f} |
+
+### Confusion Matrix
+
+|  | Predicted Impostor | Predicted Genuine |
+|---|---|---|
+| **Actual Impostor** | TN = {metrics.tn} | FP = {metrics.fp} |
+| **Actual Genuine** | FN = {metrics.fn} | TP = {metrics.tp} |
+
+## Visualizations
+
+### ROC Curve
 
 ![ROC Curve]({roc_path.name})
 
-## Score Distribution
+### Score Distribution
 
 ![Score Distribution]({dist_path.name})
 
+### Confusion Matrix
+
+![Confusion Matrix]({cm_path.name})
+
 ## Interpretation
 
-- **AUC = {metrics.auc:.4f}**: {"Excellent" if metrics.auc > 0.95 else "Good" if metrics.auc > 0.90 else "Moderate"}
-- **EER = {metrics.eer:.4f}**: Lower is better, represents equal false accept/reject rate
+- **AUC = {metrics.auc:.4f}**: {"Excellent" if metrics.auc > 0.95 else "Good" if metrics.auc > 0.90 else "Moderate" if metrics.auc > 0.85 else "Needs Improvement"}
+- **EER = {metrics.eer:.4f}**: Lower is better (equal false accept/reject rate)
+- **F1 = {metrics.f1:.4f}**: Harmonic mean of precision and recall
 """
     
     md_path = output_dir / "eval_report.md"
@@ -203,7 +269,7 @@ def run_evaluation(
     config: Optional[Config] = None,
 ) -> VerificationMetrics:
     """
-    Run full evaluation pipeline.
+    Run full evaluation pipeline with comprehensive metrics.
     
     Args:
         checkpoint_path: Path to model checkpoint (auto-detect if None)
@@ -268,7 +334,7 @@ def run_evaluation(
     # Evaluate
     y_true, y_scores = evaluate_test_set(model, test_loader, device)
     
-    # Compute metrics
+    # Compute comprehensive metrics
     tracker = MetricTracker()
     tracker.y_true = y_true.tolist()
     tracker.y_scores = y_scores.tolist()
@@ -281,12 +347,14 @@ def run_evaluation(
     
     roc_path = paths.reports / "roc_curve.png"
     dist_path = paths.reports / "score_distribution.png"
+    cm_path = paths.reports / "confusion_matrix.png"
     
-    plot_roc_curve(y_true, y_scores, roc_path)
+    plot_roc_curve(y_true, y_scores, roc_path, metrics.auc)
     plot_score_distribution(y_true, y_scores, dist_path)
+    plot_confusion_matrix(metrics, cm_path)
     
     # Generate report
-    generate_eval_report(metrics, paths.reports, roc_path, dist_path)
+    generate_eval_report(metrics, paths.reports, roc_path, dist_path, cm_path)
     
     logger.info("=" * 60)
     logger.info("EVALUATION COMPLETE")

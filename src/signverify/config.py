@@ -82,7 +82,7 @@ class TrainConfig:
     
     # Training
     epochs: int = 50
-    batch_size: int = 32
+    batch_size: int = 128
     num_workers: int = 4
     
     # Validation
