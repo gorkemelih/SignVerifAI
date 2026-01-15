@@ -246,11 +246,10 @@ def run_evaluation(
     
     if not test_pairs_path.exists():
         logger.info("Generating test pairs...")
-        from signverify.data.pairs import generate_pairs_for_split
-        from signverify.config import PairConfig
+        from signverify.data.pairs import generate_balanced_pairs
         
         test_df = read_csv(paths.splits / "test.csv")
-        test_pairs = generate_pairs_for_split(test_df, PairConfig())
+        test_pairs = generate_balanced_pairs(test_df, target_pairs=1200, seed=42)
         test_pairs.to_csv(test_pairs_path, index=False)
     
     # Create test DataLoader
