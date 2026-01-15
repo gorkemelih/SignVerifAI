@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signverify"
+version = "1.0.0"
+description = "Offline Signature Verification using Siamese Networks"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "TUBITAK 2209-A Project"}
+]
+keywords = ["signature", "verification", "siamese", "deep-learning", "pytorch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "torchvision>=0.15.0",
+    "typer[all]>=0.9.0",
+    "opencv-python>=4.8.0",
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    "Pillow>=10.0.0",
+    "rich>=13.0.0",
+    "scikit-learn>=1.3.0",
+    "matplotlib>=3.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+
+[project.scripts]
+signverify = "signverify.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
