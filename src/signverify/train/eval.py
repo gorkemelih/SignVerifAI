@@ -43,7 +43,7 @@ def load_model(
     """
     model = SiameseNetwork(embedding_dim=embedding_dim, pretrained=False)
     
-    checkpoint = torch.load(checkpoint_path, map_location=device)
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     model = model.to(device)
     model.eval()
