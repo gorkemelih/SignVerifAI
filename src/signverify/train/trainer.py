@@ -266,20 +266,18 @@ def run_training(
     
     logger.info(f"Train: {len(train_loader)} batches | Val: {len(val_loader)} batches")
     
-    # Optimizer with parameter groups
-    param_groups = get_param_groups(
-        model, 
-        train_config.learning_rate, 
-        train_config.backbone_lr_multiplier
-    )
-    optimizer = AdamW(param_groups, weight_decay=train_config.weight_decay)
+    # Initial optimizer - only with trainable parameters
+    # During freeze phase, only head params are trainable
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = AdamW(trainable_params, lr=train_config.learning_rate, weight_decay=train_config.weight_decay)
     
-    # Scheduler
+    # Scheduler setup (will be recreated after unfreeze if needed)
+    total_steps = len(train_loader) * train_config.epochs
+    
     if scheduler_type == "onecycle":
-        total_steps = len(train_loader) * train_config.epochs
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=[train_config.max_lr * train_config.backbone_lr_multiplier, train_config.max_lr],
+            max_lr=train_config.max_lr,
             total_steps=total_steps,
             pct_start=0.1,
             anneal_strategy='cos',
@@ -327,10 +325,37 @@ def run_training(
     for epoch in range(1, train_config.epochs + 1):
         state.epoch = epoch
         
-        # Unfreeze backbone after freeze epochs
+        # Unfreeze backbone after freeze epochs and rebuild optimizer
         if epoch == train_config.freeze_backbone_epochs + 1:
             unfreeze_backbone(model)
-            logger.info(f"Epoch {epoch}: Backbone unfrozen")
+            
+            # Rebuild optimizer with param groups (backbone + head with different LRs)
+            param_groups = get_param_groups(
+                model, 
+                train_config.learning_rate, 
+                train_config.backbone_lr_multiplier
+            )
+            optimizer = AdamW(param_groups, weight_decay=train_config.weight_decay)
+            
+            # Rebuild scheduler for remaining epochs
+            remaining_steps = len(train_loader) * (train_config.epochs - epoch + 1)
+            if scheduler_type == "onecycle":
+                scheduler = OneCycleLR(
+                    optimizer,
+                    max_lr=[train_config.max_lr * train_config.backbone_lr_multiplier, train_config.max_lr],
+                    total_steps=remaining_steps,
+                    pct_start=0.1,
+                )
+                step_per_batch = True
+            else:
+                scheduler = CosineAnnealingLR(
+                    optimizer,
+                    T_max=train_config.epochs - epoch + 1,
+                    eta_min=train_config.min_lr,
+                )
+                step_per_batch = False
+            
+            logger.info(f"Epoch {epoch}: Backbone unfrozen, optimizer rebuilt")
         
         # Train
         train_loss = train_epoch(
