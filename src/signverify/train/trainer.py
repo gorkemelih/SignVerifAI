@@ -1,24 +1,25 @@
 """Training module for SignVerify.
 
-Handles model training with CosineAnnealingLR, hard negative mining, and verbose metrics.
+Handles model training with freeze/unfreeze, AMP, OneCycleLR/CosineAnnealing, and reduced logging.
 """
 
+import csv
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 from torch.utils.data import DataLoader
+from torch.cuda.amp import autocast, GradScaler
 
 from signverify.config import Config, PathConfig
-from signverify.data.datasets import get_dataloaders, HardNegativeDataset
-from signverify.models.losses import ContrastiveLoss
-from signverify.models.metrics import MetricTracker, VerificationMetrics, log_epoch_metrics
+from signverify.data.datasets import get_dataloaders
+from signverify.models.losses import get_loss_function
+from signverify.models.metrics import MetricTracker, VerificationMetrics
 from signverify.models.siamese import SiameseNetwork
 from signverify.utils.io import write_json
 from signverify.utils.logging import get_logger
@@ -42,36 +43,58 @@ class TrainingState:
     early_stop_counter: int = 0
 
 
-def train_epoch_with_hard_mining(
+def freeze_backbone(model: nn.Module) -> None:
+    """Freeze backbone parameters."""
+    for name, param in model.named_parameters():
+        if 'backbone' in name:
+            param.requires_grad = False
+
+
+def unfreeze_backbone(model: nn.Module) -> None:
+    """Unfreeze backbone parameters."""
+    for name, param in model.named_parameters():
+        if 'backbone' in name:
+            param.requires_grad = True
+
+
+def get_param_groups(model: nn.Module, base_lr: float, backbone_lr_multiplier: float) -> list:
+    """Get parameter groups with different learning rates."""
+    backbone_params = []
+    head_params = []
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'backbone' in name:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+    
+    return [
+        {'params': backbone_params, 'lr': base_lr * backbone_lr_multiplier},
+        {'params': head_params, 'lr': base_lr},
+    ]
+
+
+def train_epoch(
     model: nn.Module,
     train_loader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
-    epoch: int,
     gradient_clip: float = 1.0,
+    use_amp: bool = False,
+    scaler: Optional[GradScaler] = None,
 ) -> float:
-    """
-    Train for one epoch with hard negative mining support.
-    
-    Returns:
-        Average training loss
-    """
+    """Train for one epoch."""
     model.train()
     total_loss = 0.0
     num_batches = len(train_loader)
     
-    dataset = train_loader.dataset
-    has_hard_mining = isinstance(dataset, HardNegativeDataset)
-    
-    all_indices = []
-    all_scores = []
-    all_targets = []
-    
     for batch_idx, batch in enumerate(train_loader):
-        if has_hard_mining:
-            img1, img2, target, indices = batch
-            all_indices.extend(indices.tolist())
+        # Handle different batch formats
+        if len(batch) == 4:  # With index from HardNegativeDataset
+            img1, img2, target, _ = batch
         else:
             img1, img2, target = batch
         
@@ -81,79 +104,32 @@ def train_epoch_with_hard_mining(
         
         optimizer.zero_grad()
         
-        emb1, emb2, similarity = model(img1, img2)
-        loss = criterion(emb1, emb2, target)
-        
-        loss.backward()
-        
-        # Gradient clipping
-        if gradient_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-        
-        optimizer.step()
-        
-        total_loss += loss.item()
-        
-        # Track for hard mining update
-        if has_hard_mining:
-            all_scores.extend(similarity.detach().cpu().numpy())
-            all_targets.extend(target.cpu().numpy())
-        
-        # Log progress every 100 batches
-        if (batch_idx + 1) % 100 == 0:
-            current_lr = optimizer.param_groups[0]['lr']
-            logger.info(f"  Batch {batch_idx + 1}/{num_batches} - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
-    
-    # Update difficulty scores for hard mining
-    if has_hard_mining and len(all_indices) > 0:
-        dataset.update_difficulty(all_indices, np.array(all_scores), np.array(all_targets))
-    
-    return total_loss / num_batches
-
-
-def train_epoch(
-    model: nn.Module,
-    train_loader: DataLoader,
-    criterion: nn.Module,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    epoch: int,
-    gradient_clip: float = 1.0,
-) -> float:
-    """
-    Standard train for one epoch.
-    
-    Returns:
-        Average training loss
-    """
-    model.train()
-    total_loss = 0.0
-    num_batches = len(train_loader)
-    
-    for batch_idx, (img1, img2, target) in enumerate(train_loader):
-        img1 = img1.to(device)
-        img2 = img2.to(device)
-        target = target.to(device)
-        
-        optimizer.zero_grad()
-        
-        emb1, emb2, similarity = model(img1, img2)
-        loss = criterion(emb1, emb2, target)
-        
-        loss.backward()
-        
-        # Gradient clipping
-        if gradient_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
-        
-        optimizer.step()
+        # Mixed precision forward pass
+        if use_amp and device.type == 'cuda':
+            with autocast():
+                emb1, emb2, similarity = model(img1, img2)
+                loss = criterion(emb1, emb2, target)
+            
+            scaler.scale(loss).backward()
+            
+            if gradient_clip > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+            
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            emb1, emb2, similarity = model(img1, img2)
+            loss = criterion(emb1, emb2, target)
+            
+            loss.backward()
+            
+            if gradient_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+            
+            optimizer.step()
         
         total_loss += loss.item()
-        
-        # Log progress every 100 batches
-        if (batch_idx + 1) % 100 == 0:
-            current_lr = optimizer.param_groups[0]['lr']
-            logger.info(f"  Batch {batch_idx + 1}/{num_batches} - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
     
     return total_loss / num_batches
 
@@ -164,18 +140,18 @@ def validate_epoch(
     criterion: nn.Module,
     device: torch.device,
 ) -> tuple[float, VerificationMetrics]:
-    """
-    Validate for one epoch with comprehensive metrics.
-    
-    Returns:
-        Tuple of (average loss, metrics)
-    """
+    """Validate for one epoch."""
     model.eval()
     total_loss = 0.0
     tracker = MetricTracker()
     
     with torch.no_grad():
-        for img1, img2, target in val_loader:
+        for batch in val_loader:
+            if len(batch) == 4:
+                img1, img2, target, _ = batch
+            else:
+                img1, img2, target = batch
+            
             img1 = img1.to(device)
             img2 = img2.to(device)
             target = target.to(device)
@@ -214,21 +190,24 @@ def save_checkpoint(
     }, path)
 
 
+def save_train_history(history: list, path: Path) -> None:
+    """Save training history to CSV."""
+    if not history:
+        return
+    
+    with open(path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=history[0].keys())
+        writer.writeheader()
+        writer.writerows(history)
+
+
 def run_training(
     config: Optional[Config] = None,
     use_hard_mining: bool = True,
-    scheduler_type: str = "cosine",  # "cosine" or "onecycle"
+    scheduler_type: str = "onecycle",
 ) -> TrainingState:
     """
-    Run full training pipeline with hard negative mining.
-    
-    Args:
-        config: Configuration (uses defaults if None)
-        use_hard_mining: Whether to use hard negative mining
-        scheduler_type: "cosine" for CosineAnnealingLR, "onecycle" for OneCycleLR
-    
-    Returns:
-        Final training state
+    Run full training pipeline with advanced features.
     """
     if config is None:
         config = Config()
@@ -239,17 +218,19 @@ def run_training(
     paths = config.paths
     train_config = config.train
     
-    logger.info(f"Using device: {device}")
+    # Print configuration once
     logger.info("=" * 60)
-    logger.info("STARTING TRAINING")
+    logger.info("TRAINING CONFIGURATION")
     logger.info("=" * 60)
+    logger.info(f"Device: {device}")
     logger.info(f"Epochs: {train_config.epochs}")
     logger.info(f"Batch size: {train_config.batch_size}")
-    logger.info(f"Learning rate: {train_config.learning_rate}")
-    logger.info(f"Loss margin: {train_config.loss_margin}")
-    logger.info(f"Hard negative mining: {use_hard_mining}")
-    logger.info(f"LR Scheduler: {scheduler_type}")
-    logger.info(f"Early stopping patience: {train_config.early_stopping_patience}")
+    logger.info(f"Loss: {train_config.loss_type} (margin={train_config.loss_margin})")
+    logger.info(f"Scheduler: {scheduler_type}")
+    logger.info(f"Freeze epochs: {train_config.freeze_backbone_epochs}")
+    logger.info(f"AMP: {train_config.use_amp and device.type == 'cuda'}")
+    logger.info(f"Log every: {train_config.log_every} epochs")
+    logger.info("=" * 60)
     
     # Create model
     model = SiameseNetwork(
@@ -258,14 +239,22 @@ def run_training(
     )
     model = model.to(device)
     
-    # Use torch.compile for PyTorch 2.0+ if enabled
+    # Compile if enabled
     if train_config.use_compile and hasattr(torch, 'compile'):
         model = torch.compile(model)
-        logger.info("Using torch.compile for acceleration")
     
-    # Loss function with reduced margin
-    criterion = ContrastiveLoss(margin=train_config.loss_margin)
-    logger.info(f"Contrastive Loss with margin={train_config.loss_margin}")
+    # Freeze backbone initially
+    if train_config.freeze_backbone_epochs > 0:
+        freeze_backbone(model)
+        logger.info(f"Backbone frozen for first {train_config.freeze_backbone_epochs} epochs")
+    
+    # Loss function
+    criterion = get_loss_function(
+        loss_type=train_config.loss_type,
+        margin=train_config.loss_margin,
+        triplet_margin=train_config.triplet_margin,
+        use_hard_negatives=train_config.use_hard_negatives,
+    )
     
     # DataLoaders
     train_loader, val_loader = get_dataloaders(
@@ -275,39 +264,43 @@ def run_training(
         use_hard_mining=use_hard_mining,
     )
     
-    logger.info(f"Train batches: {len(train_loader)}")
-    logger.info(f"Val batches: {len(val_loader)}")
+    logger.info(f"Train: {len(train_loader)} batches | Val: {len(val_loader)} batches")
     
-    # Optimizer
-    optimizer = AdamW(
-        model.parameters(),
-        lr=train_config.learning_rate,
-        weight_decay=train_config.weight_decay,
+    # Optimizer with parameter groups
+    param_groups = get_param_groups(
+        model, 
+        train_config.learning_rate, 
+        train_config.backbone_lr_multiplier
     )
+    optimizer = AdamW(param_groups, weight_decay=train_config.weight_decay)
     
-    # Scheduler selection
-    if scheduler_type == "cosine":
-        scheduler = CosineAnnealingLR(
-            optimizer,
-            T_max=train_config.epochs,
-            eta_min=1e-6,  # Min LR
-        )
-        logger.info(f"CosineAnnealingLR: T_max={train_config.epochs}, eta_min=1e-6")
-    else:
+    # Scheduler
+    if scheduler_type == "onecycle":
         total_steps = len(train_loader) * train_config.epochs
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=1e-3,
+            max_lr=[train_config.max_lr * train_config.backbone_lr_multiplier, train_config.max_lr],
             total_steps=total_steps,
             pct_start=0.1,
             anneal_strategy='cos',
             div_factor=10,
             final_div_factor=1000,
         )
-        logger.info(f"OneCycleLR: max_lr=1e-3, total_steps={total_steps}")
+        step_per_batch = True
+    else:
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=train_config.epochs,
+            eta_min=train_config.min_lr,
+        )
+        step_per_batch = False
+    
+    # AMP scaler
+    scaler = GradScaler() if train_config.use_amp and device.type == 'cuda' else None
     
     # Training state
     state = TrainingState()
+    history = []
     
     # Create run directory
     run_name = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -319,90 +312,110 @@ def run_training(
         "epochs": train_config.epochs,
         "batch_size": train_config.batch_size,
         "learning_rate": train_config.learning_rate,
-        "embedding_dim": train_config.embedding_dim,
-        "backbone": train_config.backbone,
+        "loss_type": train_config.loss_type,
         "loss_margin": train_config.loss_margin,
-        "device": str(device),
         "scheduler": scheduler_type,
-        "hard_mining": use_hard_mining,
+        "freeze_epochs": train_config.freeze_backbone_epochs,
+        "use_amp": train_config.use_amp,
+        "device": str(device),
     }
     write_json(config_dict, run_dir / "config.json")
     
     # Training loop
+    logger.info("\nStarting training...")
+    
     for epoch in range(1, train_config.epochs + 1):
         state.epoch = epoch
         
-        logger.info(f"\nEpoch {epoch}/{train_config.epochs}")
-        logger.info("-" * 40)
+        # Unfreeze backbone after freeze epochs
+        if epoch == train_config.freeze_backbone_epochs + 1:
+            unfreeze_backbone(model)
+            logger.info(f"Epoch {epoch}: Backbone unfrozen")
         
-        # Train with appropriate function
-        if use_hard_mining:
-            train_loss = train_epoch_with_hard_mining(
-                model, train_loader, criterion, optimizer,
-                device, epoch, train_config.gradient_clip
-            )
+        # Train
+        train_loss = train_epoch(
+            model, train_loader, criterion, optimizer,
+            device, train_config.gradient_clip,
+            train_config.use_amp and device.type == 'cuda',
+            scaler
+        )
+        
+        # Step scheduler
+        if step_per_batch:
+            pass  # OneCycleLR steps per batch in train_epoch
         else:
-            train_loss = train_epoch(
-                model, train_loader, criterion, optimizer,
-                device, epoch, train_config.gradient_clip
-            )
-        
-        # Step scheduler (after epoch for CosineAnnealing)
-        if scheduler_type == "cosine":
             scheduler.step()
         
-        # Validate with full metrics
+        # Validate
         val_loss, metrics = validate_epoch(model, val_loader, criterion, device)
         
-        # Log verbose metrics
-        log_epoch_metrics(epoch, train_loss, val_loss, metrics)
+        # Current LR
+        current_lr = optimizer.param_groups[-1]['lr']
         
-        # Track history
+        # Record history
+        history_record = {
+            'epoch': epoch,
+            'train_loss': round(train_loss, 6),
+            'val_loss': round(val_loss, 6),
+            'auc': round(metrics.auc, 4),
+            'eer': round(metrics.eer, 4),
+            'f1': round(metrics.f1, 4),
+            'precision': round(metrics.precision, 4),
+            'recall': round(metrics.recall, 4),
+            'accuracy': round(metrics.accuracy, 4),
+            'lr': round(current_lr, 8),
+        }
+        history.append(history_record)
+        
+        # Track
         state.train_losses.append(train_loss)
         state.val_losses.append(val_loss)
         state.val_aucs.append(metrics.auc)
         state.val_f1s.append(metrics.f1)
         
-        # Check for best model (using AUC as primary metric)
+        # Log (every N epochs or on improvement)
+        should_log = (epoch % train_config.log_every == 0) or (epoch == 1) or (epoch == train_config.epochs)
+        
+        if should_log:
+            logger.info(
+                f"Epoch {epoch:3d} | "
+                f"Loss: {train_loss:.4f}/{val_loss:.4f} | "
+                f"AUC: {metrics.auc:.4f} | EER: {metrics.eer:.4f} | "
+                f"F1: {metrics.f1:.4f} | Acc: {metrics.accuracy:.4f} | "
+                f"LR: {current_lr:.2e}"
+            )
+        
+        # Check for best model
         if metrics.auc > state.best_auc:
             state.best_auc = metrics.auc
             state.best_f1 = metrics.f1
             state.best_epoch = epoch
             state.early_stop_counter = 0
             
-            # Save best checkpoint
-            save_checkpoint(
-                model, optimizer, state,
-                run_dir / "checkpoint_best.pt", config
-            )
-            logger.info(f"  ✓ Saved best model (AUC: {metrics.auc:.4f}, F1: {metrics.f1:.4f}, Acc: {metrics.accuracy:.4f})")
+            save_checkpoint(model, optimizer, state, run_dir / "checkpoint_best.pt", config)
+            
+            if not should_log:
+                logger.info(f"Epoch {epoch:3d} | New best AUC: {metrics.auc:.4f}")
         else:
             state.early_stop_counter += 1
-            logger.info(f"  No improvement. Early stop counter: {state.early_stop_counter}/{train_config.early_stopping_patience}")
-        
-        # Save checkpoint at intervals
-        if epoch % train_config.checkpoint_frequency == 0:
-            save_checkpoint(
-                model, optimizer, state,
-                run_dir / f"checkpoint_epoch_{epoch:03d}.pt", config
-            )
         
         # Early stopping
         if state.early_stop_counter >= train_config.early_stopping_patience:
-            logger.info(f"\n⚠️ Early stopping triggered at epoch {epoch}")
+            logger.info(f"Early stopping at epoch {epoch}")
             break
     
-    # Save final checkpoint
-    save_checkpoint(
-        model, optimizer, state,
-        run_dir / "checkpoint_latest.pt", config
-    )
+    # Save final checkpoint and history
+    save_checkpoint(model, optimizer, state, run_dir / "checkpoint_latest.pt", config)
+    save_train_history(history, run_dir / "train_history.csv")
+    
+    # Also save to reports
+    save_train_history(history, paths.reports / "train_history.csv")
     
     logger.info("=" * 60)
     logger.info("TRAINING COMPLETE")
     logger.info(f"Best AUC: {state.best_auc:.4f} at epoch {state.best_epoch}")
     logger.info(f"Best F1:  {state.best_f1:.4f}")
-    logger.info(f"Checkpoints saved to: {run_dir}")
+    logger.info(f"Checkpoints: {run_dir}")
     logger.info("=" * 60)
     
     return state

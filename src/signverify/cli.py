@@ -148,12 +148,16 @@ def pairs(
 @app.command()
 def train(
     device: str = typer.Option("auto", help="Device: auto, mps, cuda, cpu"),
-    epochs: int = typer.Option(20, help="Number of epochs"),
+    epochs: int = typer.Option(30, help="Number of epochs"),
     batch_size: int = typer.Option(128, help="Batch size"),
     lr: float = typer.Option(1e-4, help="Learning rate"),
     embedding_dim: int = typer.Option(128, help="Embedding dimension"),
+    pretrained: bool = typer.Option(True, help="Use pretrained backbone"),
+    freeze_epochs: int = typer.Option(3, help="Freeze backbone for N epochs"),
     hard_mining: bool = typer.Option(True, help="Use hard negative mining"),
-    scheduler: str = typer.Option("cosine", help="LR scheduler: cosine or onecycle"),
+    loss: str = typer.Option("contrastive", help="Loss: contrastive or triplet"),
+    scheduler: str = typer.Option("onecycle", help="LR scheduler: cosine or onecycle"),
+    log_every: int = typer.Option(5, help="Log metrics every N epochs"),
     use_compile: bool = typer.Option(False, help="Use torch.compile (PyTorch 2.0+)"),
 ) -> None:
     """
@@ -163,8 +167,8 @@ def train(
     """
     setup_logging()
     console.print("[bold blue]SignVerify - Training[/bold blue]")
-    console.print(f"Device: {device} | Epochs: {epochs} | Batch: {batch_size}")
-    console.print(f"Hard Mining: {hard_mining} | Scheduler: {scheduler}")
+    console.print(f"Epochs: {epochs} | Batch: {batch_size} | Scheduler: {scheduler}")
+    console.print(f"Loss: {loss} | Hard Mining: {hard_mining} | Freeze: {freeze_epochs} epochs")
     
     from signverify.train.trainer import run_training
     
@@ -175,6 +179,11 @@ def train(
             batch_size=batch_size,
             learning_rate=lr,
             embedding_dim=embedding_dim,
+            pretrained=pretrained,
+            freeze_backbone_epochs=freeze_epochs,
+            loss_type=loss,
+            use_hard_negatives=hard_mining,
+            log_every=log_every,
             use_compile=use_compile,
         ),
         device=DeviceConfig(device=device),
@@ -189,14 +198,16 @@ def train(
 def eval(
     checkpoint: Optional[Path] = typer.Option(None, help="Checkpoint path (auto-detect if not set)"),
     device: str = typer.Option("auto", help="Device: auto, mps, cuda, cpu"),
+    threshold_mode: str = typer.Option("all", help="Threshold mode: eer, accuracy, f1, or all"),
 ) -> None:
     """
-    Evaluate trained model on test set.
+    Evaluate trained model on test set with threshold tuning.
     
     Outputs: outputs/reports/eval_report.md, ROC curve, score distribution
     """
     setup_logging()
     console.print("[bold blue]SignVerify - Evaluation[/bold blue]")
+    console.print(f"Threshold mode: {threshold_mode}")
     
     from signverify.train.eval import run_evaluation
     
@@ -204,7 +215,7 @@ def eval(
         device=DeviceConfig(device=device),
     )
     
-    metrics = run_evaluation(checkpoint_path=checkpoint, config=config)
+    metrics = run_evaluation(checkpoint_path=checkpoint, config=config, threshold_mode=threshold_mode)
     
     console.print(f"\n[bold green]✓ Evaluation complete! AUC: {metrics.auc:.4f}, EER: {metrics.eer:.4f}[/bold green]")
 

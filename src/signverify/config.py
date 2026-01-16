@@ -72,18 +72,39 @@ class TrainConfig:
     embedding_dim: int = 128
     pretrained: bool = True
     
+    # Freeze/Unfreeze strategy
+    freeze_backbone_epochs: int = 3  # Freeze backbone for first N epochs
+    backbone_lr_multiplier: float = 0.1  # Backbone LR = base_lr * multiplier
+    
     # Loss
-    loss_margin: float = 0.5
+    loss_type: Literal["contrastive", "triplet"] = "contrastive"
+    loss_margin: float = 0.5  # For contrastive loss
+    triplet_margin: float = 0.2  # For triplet loss
+    
+    # Hard negative mining
+    use_hard_negatives: bool = True
+    hard_negative_ratio: float = 0.3  # Ratio of hard negatives per batch
     
     # Optimizer
     optimizer: str = "adamw"
     learning_rate: float = 1e-4
-    weight_decay: float = 1e-5
+    weight_decay: float = 1e-4
+    
+    # LR Scheduler
+    scheduler: Literal["cosine", "onecycle"] = "onecycle"
+    max_lr: float = 1e-3
+    min_lr: float = 1e-6
     
     # Training
     epochs: int = 50
     batch_size: int = 128
     num_workers: int = 4
+    
+    # Mixed precision
+    use_amp: bool = True  # Automatic mixed precision (CUDA only)
+    
+    # Logging
+    log_every: int = 5  # Log metrics every N epochs
     
     # Validation
     val_frequency: int = 1
