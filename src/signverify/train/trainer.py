@@ -44,16 +44,17 @@ class TrainingState:
 
 
 def freeze_backbone(model: nn.Module) -> None:
-    """Freeze backbone parameters."""
+    """Freeze backbone CNN features (not embedding head)."""
     for name, param in model.named_parameters():
-        if 'backbone' in name:
+        # Only freeze backbone.features, not backbone.embedding
+        if 'backbone.features' in name or 'backbone.avgpool' in name:
             param.requires_grad = False
 
 
 def unfreeze_backbone(model: nn.Module) -> None:
-    """Unfreeze backbone parameters."""
+    """Unfreeze backbone CNN features."""
     for name, param in model.named_parameters():
-        if 'backbone' in name:
+        if 'backbone.features' in name or 'backbone.avgpool' in name:
             param.requires_grad = True
 
 
