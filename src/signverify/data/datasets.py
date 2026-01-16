@@ -1,6 +1,6 @@
 """PyTorch Dataset classes for SignVerify.
 
-Provides SignaturePairDataset for Siamese network training with augmentation.
+Provides SignaturePairDataset for Siamese network training with enhanced augmentation.
 """
 
 import random
@@ -39,31 +39,34 @@ def grayscale_to_rgb(img: torch.Tensor) -> torch.Tensor:
 
 class TrainTransform:
     """
-    Training transform with augmentation.
+    Enhanced training transform with stronger augmentation.
     
     Applies:
-    - Random rotation ±3°
-    - Random translation 2-4%
-    - Random brightness/contrast adjustment
+    - Random rotation ±5° (increased from ±3°)
+    - Random translation 4-5% (increased from 2-4%)
+    - Random brightness/contrast ±10%
     - Optional small noise
     - NO horizontal flip (signatures are directional)
     """
     
     def __init__(self):
-        # Geometric augmentation
+        # Stronger geometric augmentation
         self.affine = transforms.RandomAffine(
-            degrees=3,  # ±3° rotation
-            translate=(0.04, 0.04),  # 2-4% translation
-            scale=None,
-            shear=None,
+            degrees=5,  # ±5° rotation (was ±3°)
+            translate=(0.05, 0.05),  # 5% translation (was 4%)
+            scale=(0.95, 1.05),  # Slight scale variation
+            shear=2,  # Small shear
             fill=255,  # White background
         )
         
-        # Color augmentation
+        # Stronger color augmentation
         self.color_jitter = transforms.ColorJitter(
-            brightness=0.1,
-            contrast=0.1,
+            brightness=0.1,  # ±10%
+            contrast=0.1,    # ±10%
         )
+        
+        # Optional Gaussian blur
+        self.blur = transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))
         
         # ImageNet normalization
         self.normalize_mean = [0.485, 0.456, 0.406]
@@ -78,6 +81,10 @@ class TrainTransform:
         # Apply augmentations
         img = self.affine(img)
         img = self.color_jitter(img)
+        
+        # Random blur with 20% probability
+        if random.random() < 0.2:
+            img = self.blur(img)
         
         # Convert to tensor
         arr = np.array(img, dtype=np.float32) / 255.0
@@ -172,7 +179,7 @@ class SignaturePairDataset(Dataset):
         
         logger.info(
             f"Loaded {len(self.pairs_df)} pairs from {pairs_csv} "
-            f"(train={is_train}, augmentation={'on' if is_train else 'off'})"
+            f"(train={is_train}, augmentation={'enhanced' if is_train else 'off'})"
         )
     
     def __len__(self) -> int:
@@ -199,6 +206,109 @@ class SignaturePairDataset(Dataset):
         target = torch.tensor(row["target"], dtype=torch.float32)
         
         return img1, img2, target
+
+
+class HardNegativeDataset(Dataset):
+    """
+    Dataset with hard negative mining support.
+    
+    Tracks prediction scores and samples hard negatives more frequently.
+    """
+    
+    def __init__(
+        self,
+        pairs_csv: Path,
+        data_dir: Path,
+        is_train: bool = True,
+        hard_ratio: float = 0.3,
+    ):
+        """
+        Initialize dataset with hard negative mining.
+        
+        Args:
+            pairs_csv: Path to pairs CSV file
+            data_dir: Base directory for images
+            is_train: If True, use training augmentation
+            hard_ratio: Ratio of hard negatives to sample (0.0-1.0)
+        """
+        self.pairs_df = read_csv(pairs_csv)
+        self.data_dir = Path(data_dir)
+        self.is_train = is_train
+        self.hard_ratio = hard_ratio
+        
+        self.transform = TrainTransform() if is_train else ValTransform()
+        
+        # Initialize difficulty scores (higher = harder)
+        self.difficulty_scores = np.ones(len(self.pairs_df))
+        
+        logger.info(
+            f"HardNegativeDataset: {len(self.pairs_df)} pairs, "
+            f"hard_ratio={hard_ratio}"
+        )
+    
+    def __len__(self) -> int:
+        return len(self.pairs_df)
+    
+    def update_difficulty(self, indices: list, scores: np.ndarray, targets: np.ndarray):
+        """
+        Update difficulty scores based on model predictions.
+        
+        Hard negatives: negative pairs with high similarity scores
+        Hard positives: positive pairs with low similarity scores
+        """
+        for idx, score, target in zip(indices, scores, targets):
+            if target == 0:  # Negative pair
+                # Higher score = harder negative (model thinks they're similar)
+                self.difficulty_scores[idx] = max(0.1, score)
+            else:  # Positive pair
+                # Lower score = harder positive (model thinks they're different)
+                self.difficulty_scores[idx] = max(0.1, 1.0 - score)
+    
+    def get_hard_sample_indices(self, batch_size: int) -> list:
+        """Get indices weighted by difficulty for hard mining."""
+        # Normalize to probability distribution
+        probs = self.difficulty_scores / self.difficulty_scores.sum()
+        
+        # Sample hard examples
+        n_hard = int(batch_size * self.hard_ratio)
+        hard_indices = np.random.choice(
+            len(self.pairs_df),
+            size=n_hard,
+            replace=False,
+            p=probs
+        )
+        
+        # Sample random examples for rest
+        n_random = batch_size - n_hard
+        random_indices = np.random.choice(
+            len(self.pairs_df),
+            size=n_random,
+            replace=False
+        )
+        
+        return list(hard_indices) + list(random_indices)
+    
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+        """
+        Get a pair of images with label and index.
+        
+        Returns:
+            Tuple of (img1, img2, target, idx)
+        """
+        row = self.pairs_df.iloc[idx]
+        
+        img1_path = self.data_dir / row["img1_path"]
+        img2_path = self.data_dir / row["img2_path"]
+        
+        img1 = Image.open(img1_path).convert("L")
+        img2 = Image.open(img2_path).convert("L")
+        
+        img1 = self.transform(img1)
+        img2 = self.transform(img2)
+        
+        target = torch.tensor(row["target"], dtype=torch.float32)
+        
+        return img1, img2, target, idx
 
 
 class SignatureDataset(Dataset):
@@ -247,8 +357,9 @@ class SignatureDataset(Dataset):
 
 def get_dataloaders(
     paths: Optional[PathConfig] = None,
-    batch_size: int = 32,
+    batch_size: int = 128,
     num_workers: int = 4,
+    use_hard_mining: bool = False,
 ) -> tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader]:
     """
     Get train and validation DataLoaders.
@@ -257,6 +368,7 @@ def get_dataloaders(
         paths: Path configuration
         batch_size: Batch size
         num_workers: Number of worker processes
+        use_hard_mining: Whether to use hard negative mining dataset
     
     Returns:
         Tuple of (train_loader, val_loader)
@@ -264,16 +376,23 @@ def get_dataloaders(
     if paths is None:
         paths = PathConfig()
     
-    train_dataset = SignaturePairDataset(
-        pairs_csv=paths.pairs / "pairs_train.csv",
-        data_dir=paths.data_processed,
-        is_train=True,  # Enable augmentation for training
-    )
+    if use_hard_mining:
+        train_dataset = HardNegativeDataset(
+            pairs_csv=paths.pairs / "pairs_train.csv",
+            data_dir=paths.data_processed,
+            is_train=True,
+        )
+    else:
+        train_dataset = SignaturePairDataset(
+            pairs_csv=paths.pairs / "pairs_train.csv",
+            data_dir=paths.data_processed,
+            is_train=True,
+        )
     
     val_dataset = SignaturePairDataset(
         pairs_csv=paths.pairs / "pairs_val.csv",
         data_dir=paths.data_processed,
-        is_train=False,  # No augmentation for validation
+        is_train=False,
     )
     
     train_loader = torch.utils.data.DataLoader(

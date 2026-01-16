@@ -148,10 +148,12 @@ def pairs(
 @app.command()
 def train(
     device: str = typer.Option("auto", help="Device: auto, mps, cuda, cpu"),
-    epochs: int = typer.Option(50, help="Number of epochs"),
-    batch_size: int = typer.Option(32, help="Batch size"),
+    epochs: int = typer.Option(20, help="Number of epochs"),
+    batch_size: int = typer.Option(128, help="Batch size"),
     lr: float = typer.Option(1e-4, help="Learning rate"),
     embedding_dim: int = typer.Option(128, help="Embedding dimension"),
+    hard_mining: bool = typer.Option(True, help="Use hard negative mining"),
+    scheduler: str = typer.Option("cosine", help="LR scheduler: cosine or onecycle"),
     use_compile: bool = typer.Option(False, help="Use torch.compile (PyTorch 2.0+)"),
 ) -> None:
     """
@@ -162,6 +164,7 @@ def train(
     setup_logging()
     console.print("[bold blue]SignVerify - Training[/bold blue]")
     console.print(f"Device: {device} | Epochs: {epochs} | Batch: {batch_size}")
+    console.print(f"Hard Mining: {hard_mining} | Scheduler: {scheduler}")
     
     from signverify.train.trainer import run_training
     
@@ -177,7 +180,7 @@ def train(
         device=DeviceConfig(device=device),
     )
     
-    state = run_training(config=config)
+    state = run_training(config=config, use_hard_mining=hard_mining, scheduler_type=scheduler)
     
     console.print(f"\n[bold green]✓ Training complete! Best AUC: {state.best_auc:.4f}[/bold green]")
 

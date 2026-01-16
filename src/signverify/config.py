@@ -73,7 +73,7 @@ class TrainConfig:
     pretrained: bool = True
     
     # Loss
-    loss_margin: float = 1.0
+    loss_margin: float = 0.5
     
     # Optimizer
     optimizer: str = "adamw"

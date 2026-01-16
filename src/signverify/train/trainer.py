@@ -1,6 +1,6 @@
 """Training module for SignVerify.
 
-Handles model training with OneCycleLR, verbose metrics, and early stopping.
+Handles model training with CosineAnnealingLR, hard negative mining, and verbose metrics.
 """
 
 from dataclasses import dataclass, field
@@ -8,14 +8,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import torch
 from torch import nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 from torch.utils.data import DataLoader
 
 from signverify.config import Config, PathConfig
-from signverify.data.datasets import get_dataloaders
+from signverify.data.datasets import get_dataloaders, HardNegativeDataset
 from signverify.models.losses import ContrastiveLoss
 from signverify.models.metrics import MetricTracker, VerificationMetrics, log_epoch_metrics
 from signverify.models.siamese import SiameseNetwork
@@ -41,18 +42,86 @@ class TrainingState:
     early_stop_counter: int = 0
 
 
-def train_epoch(
+def train_epoch_with_hard_mining(
     model: nn.Module,
     train_loader: DataLoader,
     criterion: nn.Module,
     optimizer: torch.optim.Optimizer,
-    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     device: torch.device,
     epoch: int,
     gradient_clip: float = 1.0,
 ) -> float:
     """
-    Train for one epoch.
+    Train for one epoch with hard negative mining support.
+    
+    Returns:
+        Average training loss
+    """
+    model.train()
+    total_loss = 0.0
+    num_batches = len(train_loader)
+    
+    dataset = train_loader.dataset
+    has_hard_mining = isinstance(dataset, HardNegativeDataset)
+    
+    all_indices = []
+    all_scores = []
+    all_targets = []
+    
+    for batch_idx, batch in enumerate(train_loader):
+        if has_hard_mining:
+            img1, img2, target, indices = batch
+            all_indices.extend(indices.tolist())
+        else:
+            img1, img2, target = batch
+        
+        img1 = img1.to(device)
+        img2 = img2.to(device)
+        target = target.to(device)
+        
+        optimizer.zero_grad()
+        
+        emb1, emb2, similarity = model(img1, img2)
+        loss = criterion(emb1, emb2, target)
+        
+        loss.backward()
+        
+        # Gradient clipping
+        if gradient_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+        
+        optimizer.step()
+        
+        total_loss += loss.item()
+        
+        # Track for hard mining update
+        if has_hard_mining:
+            all_scores.extend(similarity.detach().cpu().numpy())
+            all_targets.extend(target.cpu().numpy())
+        
+        # Log progress every 100 batches
+        if (batch_idx + 1) % 100 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            logger.info(f"  Batch {batch_idx + 1}/{num_batches} - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
+    
+    # Update difficulty scores for hard mining
+    if has_hard_mining and len(all_indices) > 0:
+        dataset.update_difficulty(all_indices, np.array(all_scores), np.array(all_targets))
+    
+    return total_loss / num_batches
+
+
+def train_epoch(
+    model: nn.Module,
+    train_loader: DataLoader,
+    criterion: nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    epoch: int,
+    gradient_clip: float = 1.0,
+) -> float:
+    """
+    Standard train for one epoch.
     
     Returns:
         Average training loss
@@ -79,14 +148,10 @@ def train_epoch(
         
         optimizer.step()
         
-        # Step scheduler per batch for OneCycleLR
-        if scheduler is not None:
-            scheduler.step()
-        
         total_loss += loss.item()
         
-        # Log progress every 50 batches
-        if (batch_idx + 1) % 50 == 0:
+        # Log progress every 100 batches
+        if (batch_idx + 1) % 100 == 0:
             current_lr = optimizer.param_groups[0]['lr']
             logger.info(f"  Batch {batch_idx + 1}/{num_batches} - Loss: {loss.item():.4f} - LR: {current_lr:.6f}")
     
@@ -149,12 +214,18 @@ def save_checkpoint(
     }, path)
 
 
-def run_training(config: Optional[Config] = None) -> TrainingState:
+def run_training(
+    config: Optional[Config] = None,
+    use_hard_mining: bool = True,
+    scheduler_type: str = "cosine",  # "cosine" or "onecycle"
+) -> TrainingState:
     """
-    Run full training pipeline.
+    Run full training pipeline with hard negative mining.
     
     Args:
         config: Configuration (uses defaults if None)
+        use_hard_mining: Whether to use hard negative mining
+        scheduler_type: "cosine" for CosineAnnealingLR, "onecycle" for OneCycleLR
     
     Returns:
         Final training state
@@ -175,8 +246,10 @@ def run_training(config: Optional[Config] = None) -> TrainingState:
     logger.info(f"Epochs: {train_config.epochs}")
     logger.info(f"Batch size: {train_config.batch_size}")
     logger.info(f"Learning rate: {train_config.learning_rate}")
+    logger.info(f"Loss margin: {train_config.loss_margin}")
+    logger.info(f"Hard negative mining: {use_hard_mining}")
+    logger.info(f"LR Scheduler: {scheduler_type}")
     logger.info(f"Early stopping patience: {train_config.early_stopping_patience}")
-    logger.info("Setting up training...")
     
     # Create model
     model = SiameseNetwork(
@@ -190,14 +263,16 @@ def run_training(config: Optional[Config] = None) -> TrainingState:
         model = torch.compile(model)
         logger.info("Using torch.compile for acceleration")
     
-    # Loss function
+    # Loss function with reduced margin
     criterion = ContrastiveLoss(margin=train_config.loss_margin)
+    logger.info(f"Contrastive Loss with margin={train_config.loss_margin}")
     
     # DataLoaders
     train_loader, val_loader = get_dataloaders(
         paths=paths,
         batch_size=train_config.batch_size,
         num_workers=train_config.num_workers,
+        use_hard_mining=use_hard_mining,
     )
     
     logger.info(f"Train batches: {len(train_loader)}")
@@ -210,18 +285,26 @@ def run_training(config: Optional[Config] = None) -> TrainingState:
         weight_decay=train_config.weight_decay,
     )
     
-    # OneCycleLR scheduler
-    total_steps = len(train_loader) * train_config.epochs
-    scheduler = OneCycleLR(
-        optimizer,
-        max_lr=1e-3,  # Max LR
-        total_steps=total_steps,
-        pct_start=0.1,  # 10% warmup
-        anneal_strategy='cos',
-        div_factor=10,  # Initial LR = max_lr / div_factor
-        final_div_factor=1000,  # Final LR = max_lr / final_div_factor
-    )
-    logger.info(f"OneCycleLR: max_lr=1e-3, min_lr=1e-6, total_steps={total_steps}")
+    # Scheduler selection
+    if scheduler_type == "cosine":
+        scheduler = CosineAnnealingLR(
+            optimizer,
+            T_max=train_config.epochs,
+            eta_min=1e-6,  # Min LR
+        )
+        logger.info(f"CosineAnnealingLR: T_max={train_config.epochs}, eta_min=1e-6")
+    else:
+        total_steps = len(train_loader) * train_config.epochs
+        scheduler = OneCycleLR(
+            optimizer,
+            max_lr=1e-3,
+            total_steps=total_steps,
+            pct_start=0.1,
+            anneal_strategy='cos',
+            div_factor=10,
+            final_div_factor=1000,
+        )
+        logger.info(f"OneCycleLR: max_lr=1e-3, total_steps={total_steps}")
     
     # Training state
     state = TrainingState()
@@ -240,8 +323,8 @@ def run_training(config: Optional[Config] = None) -> TrainingState:
         "backbone": train_config.backbone,
         "loss_margin": train_config.loss_margin,
         "device": str(device),
-        "scheduler": "OneCycleLR",
-        "max_lr": 1e-3,
+        "scheduler": scheduler_type,
+        "hard_mining": use_hard_mining,
     }
     write_json(config_dict, run_dir / "config.json")
     
@@ -252,11 +335,21 @@ def run_training(config: Optional[Config] = None) -> TrainingState:
         logger.info(f"\nEpoch {epoch}/{train_config.epochs}")
         logger.info("-" * 40)
         
-        # Train
-        train_loss = train_epoch(
-            model, train_loader, criterion, optimizer, scheduler,
-            device, epoch, train_config.gradient_clip
-        )
+        # Train with appropriate function
+        if use_hard_mining:
+            train_loss = train_epoch_with_hard_mining(
+                model, train_loader, criterion, optimizer,
+                device, epoch, train_config.gradient_clip
+            )
+        else:
+            train_loss = train_epoch(
+                model, train_loader, criterion, optimizer,
+                device, epoch, train_config.gradient_clip
+            )
+        
+        # Step scheduler (after epoch for CosineAnnealing)
+        if scheduler_type == "cosine":
+            scheduler.step()
         
         # Validate with full metrics
         val_loss, metrics = validate_epoch(model, val_loader, criterion, device)
@@ -282,7 +375,7 @@ def run_training(config: Optional[Config] = None) -> TrainingState:
                 model, optimizer, state,
                 run_dir / "checkpoint_best.pt", config
             )
-            logger.info(f"  ✓ Saved best model (AUC: {metrics.auc:.4f}, F1: {metrics.f1:.4f})")
+            logger.info(f"  ✓ Saved best model (AUC: {metrics.auc:.4f}, F1: {metrics.f1:.4f}, Acc: {metrics.accuracy:.4f})")
         else:
             state.early_stop_counter += 1
             logger.info(f"  No improvement. Early stop counter: {state.early_stop_counter}/{train_config.early_stopping_patience}")
