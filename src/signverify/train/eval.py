@@ -46,15 +46,31 @@ def load_model(
     device: torch.device,
     embedding_dim: int = 128,
 ) -> SiameseNetwork:
-    """Load model from checkpoint."""
-    model = SiameseNetwork(embedding_dim=embedding_dim, pretrained=False)
+    """Load model from checkpoint with correct backbone architecture."""
+    import json
+    
+    # Try to read backbone from config.json in same directory
+    config_path = checkpoint_path.parent / "config.json"
+    backbone_name = "mobilenet_v3_large"  # default
+    
+    if config_path.exists():
+        with open(config_path) as f:
+            config_data = json.load(f)
+            backbone_name = config_data.get("backbone", "mobilenet_v3_large")
+            logger.info(f"Loaded config: backbone={backbone_name}")
+    
+    model = SiameseNetwork(
+        backbone_name=backbone_name,
+        embedding_dim=embedding_dim,
+        pretrained=False
+    )
     
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
     model = model.to(device)
     model.eval()
     
-    logger.info(f"Loaded model from {checkpoint_path}")
+    logger.info(f"Loaded model from {checkpoint_path} (backbone={backbone_name})")
     return model
 
 
