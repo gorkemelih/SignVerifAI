@@ -68,9 +68,10 @@ class TrainConfig:
     """Training hyperparameters."""
     
     # Model
-    backbone: str = "mobilenet_v3_large"
+    backbone: Literal["mobilenet_v3_large", "resnet50", "efficientnet_b0"] = "mobilenet_v3_large"
     embedding_dim: int = 128
     pretrained: bool = True
+    img_size: int = 224  # Input resolution: 224, 256, or 320
     
     # Freeze/Unfreeze strategy
     freeze_backbone_epochs: int = 3  # Freeze backbone for first N epochs
@@ -80,13 +81,18 @@ class TrainConfig:
     head_lr: float = 3e-4  # Higher LR for new head layers
     
     # Loss
-    loss_type: Literal["contrastive", "triplet", "hybrid"] = "hybrid"
+    loss_type: Literal["contrastive", "triplet", "arcface", "hybrid"] = "arcface"
     loss_margin: float = 0.5  # For contrastive loss
     triplet_margin: float = 0.2  # For triplet loss
-    hybrid_alpha: float = 0.5  # Weight for contrastive in hybrid (triplet = 1-alpha)
+    hybrid_alpha: float = 0.5  # Weight for contrastive in hybrid
+    
+    # ArcFace parameters
+    arcface_s: float = 30.0  # Scale factor
+    arcface_m: float = 0.5  # Angular margin
     
     # Hard negative mining
     use_hard_negatives: bool = True
+    use_batch_hard: bool = True  # True batch-hard triplet mining
     hard_negative_ratio: float = 0.5  # 50% hard negatives
     
     # Optimizer

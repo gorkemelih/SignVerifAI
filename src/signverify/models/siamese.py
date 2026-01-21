@@ -21,6 +21,7 @@ class SiameseNetwork(nn.Module):
     
     def __init__(
         self,
+        backbone_name: str = "mobilenet_v3_large",
         embedding_dim: int = 128,
         pretrained: bool = True,
     ):
@@ -28,24 +29,26 @@ class SiameseNetwork(nn.Module):
         Initialize Siamese network.
         
         Args:
+            backbone_name: Architecture name (mobilenet_v3_large, resnet50, efficientnet_b0)
             embedding_dim: Embedding dimension from backbone
             pretrained: Use pretrained backbone weights
         """
         super().__init__()
         
         self.backbone = create_backbone(
+            backbone_name=backbone_name,
             embedding_dim=embedding_dim,
             pretrained=pretrained,
         )
         
-        logger.info(f"Initialized SiameseNetwork with embedding_dim={embedding_dim}")
+        logger.info(f"Initialized SiameseNetwork: {backbone_name}, embedding_dim={embedding_dim}")
     
     def forward_one(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass for single image.
         
         Args:
-            x: Input tensor of shape (B, 3, 224, 224)
+            x: Input tensor of shape (B, 3, H, W)
         
         Returns:
             Embedding of shape (B, embedding_dim)
@@ -61,8 +64,8 @@ class SiameseNetwork(nn.Module):
         Forward pass for image pair.
         
         Args:
-            img1: First image tensor of shape (B, 3, 224, 224)
-            img2: Second image tensor of shape (B, 3, 224, 224)
+            img1: First image tensor of shape (B, 3, H, W)
+            img2: Second image tensor of shape (B, 3, H, W)
         
         Returns:
             Tuple of (embedding1, embedding2, similarity)
@@ -98,6 +101,7 @@ class SiameseNetwork(nn.Module):
 
 
 def create_siamese_network(
+    backbone_name: str = "mobilenet_v3_large",
     embedding_dim: int = 128,
     pretrained: bool = True,
     device: torch.device = torch.device("cpu"),
@@ -106,6 +110,7 @@ def create_siamese_network(
     Factory function to create Siamese network.
     
     Args:
+        backbone_name: Architecture name
         embedding_dim: Embedding dimension
         pretrained: Use pretrained backbone
         device: Target device
@@ -114,6 +119,7 @@ def create_siamese_network(
         SiameseNetwork on specified device
     """
     model = SiameseNetwork(
+        backbone_name=backbone_name,
         embedding_dim=embedding_dim,
         pretrained=pretrained,
     )

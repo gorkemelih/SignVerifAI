@@ -148,15 +148,18 @@ def pairs(
 @app.command()
 def train(
     device: str = typer.Option("auto", help="Device: auto, mps, cuda, cpu"),
-    epochs: int = typer.Option(30, help="Number of epochs"),
+    epochs: int = typer.Option(40, help="Number of epochs"),
     batch_size: int = typer.Option(128, help="Batch size"),
+    img_size: int = typer.Option(224, help="Input image size: 224, 256, or 320"),
+    backbone: str = typer.Option("mobilenet_v3_large", help="Backbone: mobilenet_v3_large, resnet50, efficientnet_b0"),
     embedding_dim: int = typer.Option(128, help="Embedding dimension"),
     pretrained: bool = typer.Option(True, help="Use pretrained backbone"),
     freeze_epochs: int = typer.Option(3, help="Freeze backbone for N epochs"),
     backbone_lr: float = typer.Option(1e-5, help="Backbone learning rate"),
     head_lr: float = typer.Option(3e-4, help="Head learning rate"),
+    loss: str = typer.Option("arcface", help="Loss: contrastive, triplet, arcface, or hybrid"),
+    batch_hard: bool = typer.Option(True, help="Use batch-hard triplet mining"),
     hard_mining: bool = typer.Option(True, help="Use hard negative mining"),
-    loss: str = typer.Option("hybrid", help="Loss: contrastive, triplet, or hybrid"),
     scheduler: str = typer.Option("onecycle", help="LR scheduler: cosine or onecycle"),
     log_every: int = typer.Option(5, help="Log metrics every N epochs"),
     use_compile: bool = typer.Option(False, help="Use torch.compile (PyTorch 2.0+)"),
@@ -168,7 +171,7 @@ def train(
     """
     setup_logging()
     console.print("[bold blue]SignVerify - Training[/bold blue]")
-    console.print(f"Epochs: {epochs} | Batch: {batch_size} | Loss: {loss}")
+    console.print(f"Epochs: {epochs} | Batch: {batch_size} | Loss: {loss} | Backbone: {backbone}")
     console.print(f"Backbone LR: {backbone_lr} | Head LR: {head_lr} | Freeze: {freeze_epochs} epochs")
     
     from signverify.train.trainer import run_training
@@ -178,12 +181,15 @@ def train(
         train=TrainConfig(
             epochs=epochs,
             batch_size=batch_size,
+            img_size=img_size,
+            backbone=backbone,
             backbone_lr=backbone_lr,
             head_lr=head_lr,
             embedding_dim=embedding_dim,
             pretrained=pretrained,
             freeze_backbone_epochs=freeze_epochs,
             loss_type=loss,
+            use_batch_hard=batch_hard,
             use_hard_negatives=hard_mining,
             log_every=log_every,
             use_compile=use_compile,

@@ -240,6 +240,7 @@ def run_training(
     
     # Create model
     model = SiameseNetwork(
+        backbone_name=train_config.backbone,
         embedding_dim=train_config.embedding_dim,
         pretrained=train_config.pretrained,
     )
@@ -261,6 +262,9 @@ def run_training(
         triplet_margin=train_config.triplet_margin,
         use_hard_negatives=train_config.use_hard_negatives,
         hybrid_alpha=train_config.hybrid_alpha,
+        arcface_s=train_config.arcface_s,
+        arcface_m=train_config.arcface_m,
+        use_batch_hard=train_config.use_batch_hard,
     )
     
     # DataLoaders

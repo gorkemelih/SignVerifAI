@@ -303,22 +303,163 @@ class HybridLoss(nn.Module):
         return loss.mean()
 
 
+class ArcFaceLoss(nn.Module):
+    """
+    ArcFace-style loss adapted for pair-based verification.
+    
+    Uses angular margin to enforce better separation between
+    genuine and impostor pairs in embedding space.
+    
+    For pairs: maps cosine similarity to classification-like loss
+    with angular margin penalty on the genuine class.
+    """
+    
+    def __init__(self, s: float = 30.0, m: float = 0.5):
+        """
+        Args:
+            s: Scale factor (default 30)
+            m: Angular margin in radians (default 0.5 = ~28.6°)
+        """
+        super().__init__()
+        self.s = s
+        self.m = m
+    
+    def forward(
+        self,
+        emb1: torch.Tensor,
+        emb2: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute ArcFace-style loss for pairs.
+        
+        Args:
+            emb1: First embedding (B, D), L2 normalized
+            emb2: Second embedding (B, D), L2 normalized
+            target: Target labels (B,), 1=genuine, 0=impostor
+        
+        Returns:
+            Scalar loss value
+        """
+        # Cosine similarity (embeddings are L2 normalized)
+        cos_theta = torch.sum(emb1 * emb2, dim=1).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+        
+        # Convert to angle
+        theta = torch.acos(cos_theta)
+        
+        # Apply angular margin for genuine pairs
+        # For genuine pairs: add margin (make it harder)
+        # For impostor pairs: no margin
+        theta_m = theta + self.m * target
+        
+        # Convert back to cosine
+        cos_theta_m = torch.cos(theta_m)
+        
+        # Scale
+        logit_genuine = self.s * cos_theta_m
+        logit_impostor = self.s * cos_theta
+        
+        # For genuine pairs: logit should be high
+        # For impostor pairs: logit should be low
+        # Use binary cross entropy
+        logits = torch.where(target == 1, logit_genuine, logit_impostor)
+        
+        # BCE loss: genuine should be 1, impostor should be 0
+        loss = F.binary_cross_entropy_with_logits(logits, target.float())
+        
+        return loss
+
+
+class BatchHardTripletLoss(nn.Module):
+    """
+    True Batch-Hard Triplet Mining Loss.
+    
+    For each anchor in batch:
+    - Find hardest positive: same identity, max distance
+    - Find hardest negative: different identity, min distance
+    """
+    
+    def __init__(self, margin: float = 0.2):
+        super().__init__()
+        self.margin = margin
+    
+    def forward(
+        self,
+        emb1: torch.Tensor,
+        emb2: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute batch-hard triplet loss from pairs.
+        
+        Uses pair information to construct triplets with
+        hardest positive and negative within batch.
+        """
+        batch_size = emb1.size(0)
+        
+        # Combine embeddings
+        all_emb = torch.cat([emb1, emb2], dim=0)  # (2B, D)
+        
+        # Distance matrix
+        dist_mat = torch.cdist(all_emb, all_emb, p=2)  # (2B, 2B)
+        
+        # For anchors (first half), positives are where target=1
+        pos_mask = target == 1
+        neg_mask = target == 0
+        
+        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+            return torch.tensor(0.0, device=emb1.device)
+        
+        # Get anchor indices (positive pairs)
+        anchor_indices = torch.where(pos_mask)[0]
+        
+        losses = []
+        for anchor_idx in anchor_indices:
+            # Anchor embedding
+            anchor = emb1[anchor_idx]
+            
+            # Hardest positive: max distance among positives
+            pos_emb = emb2[pos_mask]
+            pos_dists = torch.pairwise_distance(anchor.unsqueeze(0).expand(pos_emb.size(0), -1), pos_emb)
+            hardest_pos_dist = pos_dists.max()
+            
+            # Hardest negative: min distance among negatives
+            neg_emb = emb2[neg_mask]
+            neg_dists = torch.pairwise_distance(anchor.unsqueeze(0).expand(neg_emb.size(0), -1), neg_emb)
+            hardest_neg_dist = neg_dists.min()
+            
+            # Triplet loss
+            loss = torch.clamp(hardest_pos_dist - hardest_neg_dist + self.margin, min=0.0)
+            losses.append(loss)
+        
+        if len(losses) == 0:
+            return torch.tensor(0.0, device=emb1.device)
+        
+        return torch.stack(losses).mean()
+
+
 def get_loss_function(
-    loss_type: str = "hybrid",
+    loss_type: str = "arcface",
     margin: float = 0.5,
     triplet_margin: float = 0.2,
     use_hard_negatives: bool = True,
     hybrid_alpha: float = 0.5,
+    arcface_s: float = 30.0,
+    arcface_m: float = 0.5,
+    use_batch_hard: bool = True,
 ) -> nn.Module:
     """
     Factory function for loss functions.
     
     Args:
-        loss_type: "contrastive", "triplet", or "hybrid"
+        loss_type: "contrastive", "triplet", "arcface", or "hybrid"
         margin: Margin for contrastive loss
         triplet_margin: Margin for triplet loss
         use_hard_negatives: Use hard negative mining
         hybrid_alpha: Weight for contrastive in hybrid
+        arcface_s: ArcFace scale factor
+        arcface_m: ArcFace angular margin
+        use_batch_hard: Use batch-hard triplet mining
     
     Returns:
         Loss module
@@ -328,7 +469,11 @@ def get_loss_function(
             return ContrastiveLossWithHardMining(margin=margin)
         return ContrastiveLoss(margin=margin)
     elif loss_type == "triplet":
+        if use_batch_hard:
+            return BatchHardTripletLoss(margin=triplet_margin)
         return TripletLoss(margin=triplet_margin)
+    elif loss_type == "arcface":
+        return ArcFaceLoss(s=arcface_s, m=arcface_m)
     elif loss_type == "hybrid":
         return HybridLoss(
             contrastive_margin=margin,
