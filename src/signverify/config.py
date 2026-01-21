@@ -69,39 +69,39 @@ class TrainConfig:
     
     # Model
     backbone: Literal["mobilenet_v3_large", "resnet50", "efficientnet_b0"] = "mobilenet_v3_large"
-    embedding_dim: int = 128
+    embedding_dim: int = 256  # Increased for better separation
     pretrained: bool = True
-    img_size: int = 224  # Input resolution: 224, 256, or 320
+    img_size: int = 224
     
     # Freeze/Unfreeze strategy
-    freeze_backbone_epochs: int = 3  # Freeze backbone for first N epochs
+    freeze_backbone_epochs: int = 5  # Freeze for 5 epochs (head warmup)
     
-    # Dual Learning Rate (key for fine-tuning)
-    backbone_lr: float = 1e-5  # Low LR for pretrained backbone
-    head_lr: float = 3e-4  # Higher LR for new head layers
+    # Dual Learning Rate (CRITICAL for fine-tuning)
+    backbone_lr: float = 3e-5  # Increased from 1e-5
+    head_lr: float = 5e-4  # Increased from 3e-4
     
-    # Loss
-    loss_type: Literal["contrastive", "triplet", "arcface", "hybrid"] = "arcface"
-    loss_margin: float = 0.5  # For contrastive loss
-    triplet_margin: float = 0.2  # For triplet loss
-    hybrid_alpha: float = 0.5  # Weight for contrastive in hybrid
+    # Loss - Contrastive is more stable than ArcFace for pairs
+    loss_type: Literal["contrastive", "triplet", "arcface", "hybrid"] = "contrastive"
+    loss_margin: float = 1.0  # Increased margin for better separation
+    triplet_margin: float = 0.3  # Increased
+    hybrid_alpha: float = 0.5
     
-    # ArcFace parameters
-    arcface_s: float = 30.0  # Scale factor
-    arcface_m: float = 0.5  # Angular margin
+    # ArcFace parameters (if used)
+    arcface_s: float = 30.0
+    arcface_m: float = 0.5
     
     # Hard negative mining
     use_hard_negatives: bool = True
-    use_batch_hard: bool = True  # True batch-hard triplet mining
-    hard_negative_ratio: float = 0.5  # 50% hard negatives
+    use_batch_hard: bool = True
+    hard_negative_ratio: float = 0.5
     
     # Optimizer
     optimizer: str = "adamw"
     weight_decay: float = 1e-4
     
-    # LR Scheduler
-    scheduler: Literal["cosine", "onecycle"] = "onecycle"
-    max_lr: float = 3e-4  # For head (backbone uses backbone_lr)
+    # LR Scheduler - Cosine is more stable
+    scheduler: Literal["cosine", "onecycle"] = "cosine"
+    max_lr: float = 5e-4
     min_lr: float = 1e-6
     
     # Training

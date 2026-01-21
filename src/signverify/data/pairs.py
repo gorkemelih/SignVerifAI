@@ -148,17 +148,19 @@ def generate_balanced_pairs(
     df: pd.DataFrame,
     target_pairs: int,
     seed: int = 42,
+    neg_same_writer_ratio: float = 0.80,
 ) -> pd.DataFrame:
     """
     Generate balanced pairs with replacement to reach target count.
     
     Ratio: Positive : Negative = 1 : 2
-    Negative: 50% genuine-forged, 50% genuine-genuine-diff
+    Negative split: 80% genuine-forged (CRITICAL for EER), 20% genuine-genuine-diff
     
     Args:
         df: Split DataFrame
         target_pairs: Target total number of pairs
         seed: Random seed
+        neg_same_writer_ratio: Ratio of same-writer forged negatives (default 0.80)
     
     Returns:
         DataFrame with columns: img1_path, img2_path, target, pair_type
@@ -170,10 +172,12 @@ def generate_balanced_pairs(
     # Calculate counts: 1:2 ratio (pos:neg)
     n_positive = target_pairs // 3
     n_negative = target_pairs - n_positive
-    n_neg_same = n_negative // 2
+    
+    # CRITICAL: 80% skilled forgery (same-writer), 20% random writer
+    n_neg_same = int(n_negative * neg_same_writer_ratio)
     n_neg_diff = n_negative - n_neg_same
     
-    logger.info(f"  Target distribution: {n_positive} pos + {n_neg_same} neg-same + {n_neg_diff} neg-diff")
+    logger.info(f"  Target distribution: {n_positive} pos + {n_neg_same} neg-same-writer ({neg_same_writer_ratio*100:.0f}%) + {n_neg_diff} neg-diff-writer")
     
     # Sample pairs with replacement
     positive = sample_positive_pairs(groups, n_positive)

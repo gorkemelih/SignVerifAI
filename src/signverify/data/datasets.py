@@ -39,34 +39,26 @@ def grayscale_to_rgb(img: torch.Tensor) -> torch.Tensor:
 
 class TrainTransform:
     """
-    Enhanced training transform with stronger augmentation.
+    Signature-friendly training transform.
     
     Applies:
-    - Random rotation ±5° (increased from ±3°)
-    - Random translation 4-5% (increased from 2-4%)
-    - Random brightness/contrast ±10%
-    - Optional small noise
+    - Random rotation ±5° 
+    - Random translation 5%
+    - Small scale variation
+    - NO ColorJitter (destroys stroke contrast)
+    - NO GaussianBlur (destroys stroke details)
     - NO horizontal flip (signatures are directional)
     """
     
     def __init__(self):
-        # Stronger geometric augmentation
+        # Geometric augmentation only
         self.affine = transforms.RandomAffine(
-            degrees=5,  # ±5° rotation (was ±3°)
-            translate=(0.05, 0.05),  # 5% translation (was 4%)
+            degrees=5,  # ±5° rotation
+            translate=(0.05, 0.05),  # 5% translation
             scale=(0.95, 1.05),  # Slight scale variation
             shear=2,  # Small shear
             fill=255,  # White background
         )
-        
-        # Stronger color augmentation
-        self.color_jitter = transforms.ColorJitter(
-            brightness=0.1,  # ±10%
-            contrast=0.1,    # ±10%
-        )
-        
-        # Optional Gaussian blur
-        self.blur = transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 0.5))
         
         # ImageNet normalization
         self.normalize_mean = [0.485, 0.456, 0.406]
@@ -74,17 +66,12 @@ class TrainTransform:
     
     def __call__(self, img: Image.Image) -> torch.Tensor:
         """Apply training augmentation."""
-        # Convert to RGB for color jitter
+        # Convert to RGB
         if img.mode == "L":
             img = img.convert("RGB")
         
-        # Apply augmentations
+        # Apply geometric augmentation only
         img = self.affine(img)
-        img = self.color_jitter(img)
-        
-        # Random blur with 20% probability
-        if random.random() < 0.2:
-            img = self.blur(img)
         
         # Convert to tensor
         arr = np.array(img, dtype=np.float32) / 255.0
