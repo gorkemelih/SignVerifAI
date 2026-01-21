@@ -317,7 +317,8 @@ def run_training(
     config_dict = {
         "epochs": train_config.epochs,
         "batch_size": train_config.batch_size,
-        "learning_rate": train_config.learning_rate,
+        "backbone_lr": train_config.backbone_lr,
+        "head_lr": train_config.head_lr,
         "loss_type": train_config.loss_type,
         "loss_margin": train_config.loss_margin,
         "scheduler": scheduler_type,

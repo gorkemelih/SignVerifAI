@@ -24,7 +24,7 @@ def get_config(
     device: str = "auto",
     batch_size: int = 32,
     epochs: int = 50,
-    lr: float = 1e-4,
+    head_lr: float = 3e-4,
 ) -> Config:
     """Build configuration from CLI arguments."""
     return Config(
@@ -32,7 +32,7 @@ def get_config(
         train=TrainConfig(
             batch_size=batch_size,
             epochs=epochs,
-            learning_rate=lr,
+            head_lr=head_lr,
         ),
         device=DeviceConfig(device=device),
         split=SplitConfig(),
