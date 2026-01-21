@@ -74,25 +74,28 @@ class TrainConfig:
     
     # Freeze/Unfreeze strategy
     freeze_backbone_epochs: int = 3  # Freeze backbone for first N epochs
-    backbone_lr_multiplier: float = 0.1  # Backbone LR = base_lr * multiplier
+    
+    # Dual Learning Rate (key for fine-tuning)
+    backbone_lr: float = 1e-5  # Low LR for pretrained backbone
+    head_lr: float = 3e-4  # Higher LR for new head layers
     
     # Loss
-    loss_type: Literal["contrastive", "triplet"] = "contrastive"
+    loss_type: Literal["contrastive", "triplet", "hybrid"] = "hybrid"
     loss_margin: float = 0.5  # For contrastive loss
     triplet_margin: float = 0.2  # For triplet loss
+    hybrid_alpha: float = 0.5  # Weight for contrastive in hybrid (triplet = 1-alpha)
     
     # Hard negative mining
     use_hard_negatives: bool = True
-    hard_negative_ratio: float = 0.3  # Ratio of hard negatives per batch
+    hard_negative_ratio: float = 0.5  # 50% hard negatives
     
     # Optimizer
     optimizer: str = "adamw"
-    learning_rate: float = 1e-4
     weight_decay: float = 1e-4
     
     # LR Scheduler
     scheduler: Literal["cosine", "onecycle"] = "onecycle"
-    max_lr: float = 1e-3
+    max_lr: float = 3e-4  # For head (backbone uses backbone_lr)
     min_lr: float = 1e-6
     
     # Training

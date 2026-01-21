@@ -58,23 +58,28 @@ def unfreeze_backbone(model: nn.Module) -> None:
             param.requires_grad = True
 
 
-def get_param_groups(model: nn.Module, base_lr: float, backbone_lr_multiplier: float) -> list:
-    """Get parameter groups with different learning rates."""
+def get_param_groups(model: nn.Module, backbone_lr: float, head_lr: float) -> list:
+    """Get parameter groups with different learning rates for fine-tuning."""
     backbone_params = []
     head_params = []
     
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if 'backbone' in name:
+        # backbone.features and backbone.avgpool are CNN backbone
+        if 'backbone.features' in name or 'backbone.avgpool' in name:
             backbone_params.append(param)
         else:
+            # backbone.embedding and everything else is head
             head_params.append(param)
     
-    return [
-        {'params': backbone_params, 'lr': base_lr * backbone_lr_multiplier},
-        {'params': head_params, 'lr': base_lr},
-    ]
+    param_groups = []
+    if backbone_params:
+        param_groups.append({'params': backbone_params, 'lr': backbone_lr, 'name': 'backbone'})
+    if head_params:
+        param_groups.append({'params': head_params, 'lr': head_lr, 'name': 'head'})
+    
+    return param_groups
 
 
 def train_epoch(
@@ -255,6 +260,7 @@ def run_training(
         margin=train_config.loss_margin,
         triplet_margin=train_config.triplet_margin,
         use_hard_negatives=train_config.use_hard_negatives,
+        hybrid_alpha=train_config.hybrid_alpha,
     )
     
     # DataLoaders
@@ -267,10 +273,11 @@ def run_training(
     
     logger.info(f"Train: {len(train_loader)} batches | Val: {len(val_loader)} batches")
     
-    # Initial optimizer - only with trainable parameters
-    # During freeze phase, only head params are trainable
+    # Initial optimizer - during freeze phase, only head params are trainable
     trainable_params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(trainable_params, lr=train_config.learning_rate, weight_decay=train_config.weight_decay)
+    optimizer = AdamW(trainable_params, lr=train_config.head_lr, weight_decay=train_config.weight_decay)
+    
+    logger.info(f"Optimizer: head_lr={train_config.head_lr}, backbone_lr={train_config.backbone_lr}")
     
     # Scheduler setup (will be recreated after unfreeze if needed)
     total_steps = len(train_loader) * train_config.epochs
@@ -278,7 +285,7 @@ def run_training(
     if scheduler_type == "onecycle":
         scheduler = OneCycleLR(
             optimizer,
-            max_lr=train_config.max_lr,
+            max_lr=train_config.head_lr,
             total_steps=total_steps,
             pct_start=0.1,
             anneal_strategy='cos',
@@ -333,17 +340,19 @@ def run_training(
             # Rebuild optimizer with param groups (backbone + head with different LRs)
             param_groups = get_param_groups(
                 model, 
-                train_config.learning_rate, 
-                train_config.backbone_lr_multiplier
+                backbone_lr=train_config.backbone_lr,
+                head_lr=train_config.head_lr,
             )
             optimizer = AdamW(param_groups, weight_decay=train_config.weight_decay)
             
             # Rebuild scheduler for remaining epochs
             remaining_steps = len(train_loader) * (train_config.epochs - epoch + 1)
             if scheduler_type == "onecycle":
+                # Different max_lr for each param group
+                max_lrs = [train_config.backbone_lr, train_config.head_lr]
                 scheduler = OneCycleLR(
                     optimizer,
-                    max_lr=[train_config.max_lr * train_config.backbone_lr_multiplier, train_config.max_lr],
+                    max_lr=max_lrs,
                     total_steps=remaining_steps,
                     pct_start=0.1,
                 )
@@ -356,7 +365,7 @@ def run_training(
                 )
                 step_per_batch = False
             
-            logger.info(f"Epoch {epoch}: Backbone unfrozen, optimizer rebuilt")
+            logger.info(f"Epoch {epoch}: Backbone unfrozen (backbone_lr={train_config.backbone_lr}, head_lr={train_config.head_lr})")
         
         # Train
         train_loss = train_epoch(

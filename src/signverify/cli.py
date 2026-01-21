@@ -150,12 +150,13 @@ def train(
     device: str = typer.Option("auto", help="Device: auto, mps, cuda, cpu"),
     epochs: int = typer.Option(30, help="Number of epochs"),
     batch_size: int = typer.Option(128, help="Batch size"),
-    lr: float = typer.Option(1e-4, help="Learning rate"),
     embedding_dim: int = typer.Option(128, help="Embedding dimension"),
     pretrained: bool = typer.Option(True, help="Use pretrained backbone"),
     freeze_epochs: int = typer.Option(3, help="Freeze backbone for N epochs"),
+    backbone_lr: float = typer.Option(1e-5, help="Backbone learning rate"),
+    head_lr: float = typer.Option(3e-4, help="Head learning rate"),
     hard_mining: bool = typer.Option(True, help="Use hard negative mining"),
-    loss: str = typer.Option("contrastive", help="Loss: contrastive or triplet"),
+    loss: str = typer.Option("hybrid", help="Loss: contrastive, triplet, or hybrid"),
     scheduler: str = typer.Option("onecycle", help="LR scheduler: cosine or onecycle"),
     log_every: int = typer.Option(5, help="Log metrics every N epochs"),
     use_compile: bool = typer.Option(False, help="Use torch.compile (PyTorch 2.0+)"),
@@ -167,8 +168,8 @@ def train(
     """
     setup_logging()
     console.print("[bold blue]SignVerify - Training[/bold blue]")
-    console.print(f"Epochs: {epochs} | Batch: {batch_size} | Scheduler: {scheduler}")
-    console.print(f"Loss: {loss} | Hard Mining: {hard_mining} | Freeze: {freeze_epochs} epochs")
+    console.print(f"Epochs: {epochs} | Batch: {batch_size} | Loss: {loss}")
+    console.print(f"Backbone LR: {backbone_lr} | Head LR: {head_lr} | Freeze: {freeze_epochs} epochs")
     
     from signverify.train.trainer import run_training
     
@@ -177,7 +178,8 @@ def train(
         train=TrainConfig(
             epochs=epochs,
             batch_size=batch_size,
-            learning_rate=lr,
+            backbone_lr=backbone_lr,
+            head_lr=head_lr,
             embedding_dim=embedding_dim,
             pretrained=pretrained,
             freeze_backbone_epochs=freeze_epochs,

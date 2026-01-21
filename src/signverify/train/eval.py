@@ -126,10 +126,38 @@ def find_optimal_thresholds(
             best_f1 = f1
             best_f1_threshold = thresh
     
+    # Security threshold: Find threshold where FRR = 1% (very low false reject)
+    # This means we accept more, but we want to see FAR at this point
+    target_frr = 0.01
+    security_threshold = 0.5
+    security_far = 1.0
+    
+    for thresh in search_thresholds:
+        y_pred = (y_scores >= thresh).astype(int)
+        # Genuine = 1, Impostor = 0
+        # FRR = FN / (FN + TP) = FN / total_genuine
+        # FAR = FP / (FP + TN) = FP / total_impostor
+        cm = sk_confusion_matrix(y_true, y_pred)
+        if cm.size == 4:
+            tn, fp, fn, tp = cm.ravel()
+            total_genuine = fn + tp
+            total_impostor = fp + tn
+            
+            if total_genuine > 0 and total_impostor > 0:
+                frr = fn / total_genuine
+                far = fp / total_impostor
+                
+                # Find threshold closest to target FRR
+                if abs(frr - target_frr) < abs((security_threshold - 0.5) * 10):
+                    if frr <= target_frr * 1.5:  # Allow some tolerance
+                        security_threshold = thresh
+                        security_far = far
+    
     return {
         'eer': {'threshold': float(eer_threshold), 'eer': float(eer_value)},
         'accuracy': {'threshold': float(best_acc_threshold), 'accuracy': float(best_acc)},
         'f1': {'threshold': float(best_f1_threshold), 'f1': float(best_f1)},
+        'security': {'threshold': float(security_threshold), 'far_at_frr_1pct': float(security_far)},
     }
 
 

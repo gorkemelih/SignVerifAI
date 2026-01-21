@@ -204,20 +204,121 @@ class ContrastiveLossWithHardMining(nn.Module):
         return loss.mean()
 
 
+class HybridLoss(nn.Module):
+    """
+    Hybrid Loss: Combination of Contrastive and Triplet Loss.
+    
+    For pairs data, constructs triplets within batch and combines losses.
+    loss = alpha * contrastive + (1-alpha) * triplet
+    """
+    
+    def __init__(
+        self, 
+        contrastive_margin: float = 0.5,
+        triplet_margin: float = 0.2,
+        alpha: float = 0.5,
+        use_hard_negatives: bool = True,
+    ):
+        super().__init__()
+        self.alpha = alpha
+        self.contrastive_margin = contrastive_margin
+        self.triplet_margin = triplet_margin
+        self.use_hard_negatives = use_hard_negatives
+        
+        if use_hard_negatives:
+            self.contrastive = ContrastiveLossWithHardMining(margin=contrastive_margin)
+        else:
+            self.contrastive = ContrastiveLoss(margin=contrastive_margin)
+    
+    def forward(
+        self,
+        emb1: torch.Tensor,
+        emb2: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute hybrid loss from pairs.
+        
+        For triplet component, we construct triplets from batch:
+        - Anchors: emb1 where target=1 (genuine pairs)
+        - Positives: emb2 where target=1
+        - Negatives: emb2 where target=0 (hardest ones)
+        """
+        # Contrastive loss (always computed)
+        contrastive_loss = self.contrastive(emb1, emb2, target)
+        
+        # Triplet loss - construct triplets from batch
+        triplet_loss = self._compute_triplet_from_pairs(emb1, emb2, target)
+        
+        # Combine losses
+        total_loss = self.alpha * contrastive_loss + (1 - self.alpha) * triplet_loss
+        
+        return total_loss
+    
+    def _compute_triplet_from_pairs(
+        self,
+        emb1: torch.Tensor,
+        emb2: torch.Tensor,
+        target: torch.Tensor,
+    ) -> torch.Tensor:
+        """Construct triplets from pair batch and compute triplet loss."""
+        # Positive pairs: target == 1
+        pos_mask = target == 1
+        # Negative pairs: target == 0
+        neg_mask = target == 0
+        
+        if pos_mask.sum() == 0 or neg_mask.sum() == 0:
+            return torch.tensor(0.0, device=emb1.device)
+        
+        # Anchors and positives from positive pairs
+        anchors = emb1[pos_mask]
+        positives = emb2[pos_mask]
+        
+        # Get negative embeddings
+        neg_emb2 = emb2[neg_mask]
+        
+        n_anchors = anchors.size(0)
+        n_negatives = neg_emb2.size(0)
+        
+        if n_negatives == 0:
+            return torch.tensor(0.0, device=emb1.device)
+        
+        # For each anchor, find hardest negative (highest similarity = smallest distance)
+        # Compute distances from each anchor to all negatives
+        anchor_expanded = anchors.unsqueeze(1)  # (n_anchors, 1, D)
+        neg_expanded = neg_emb2.unsqueeze(0)  # (1, n_negatives, D)
+        
+        distances = torch.norm(anchor_expanded - neg_expanded, p=2, dim=2)  # (n_anchors, n_negatives)
+        
+        # Hardest negative: minimum distance
+        hardest_neg_idx = distances.argmin(dim=1)
+        negatives = neg_emb2[hardest_neg_idx]
+        
+        # Compute triplet loss
+        pos_dist = torch.pairwise_distance(anchors, positives, p=2)
+        neg_dist = torch.pairwise_distance(anchors, negatives, p=2)
+        
+        loss = torch.clamp(pos_dist - neg_dist + self.triplet_margin, min=0.0)
+        
+        return loss.mean()
+
+
 def get_loss_function(
-    loss_type: str = "contrastive",
+    loss_type: str = "hybrid",
     margin: float = 0.5,
     triplet_margin: float = 0.2,
-    use_hard_negatives: bool = False,
+    use_hard_negatives: bool = True,
+    hybrid_alpha: float = 0.5,
 ) -> nn.Module:
     """
     Factory function for loss functions.
     
     Args:
-        loss_type: "contrastive" or "triplet"
+        loss_type: "contrastive", "triplet", or "hybrid"
         margin: Margin for contrastive loss
         triplet_margin: Margin for triplet loss
         use_hard_negatives: Use hard negative mining
+        hybrid_alpha: Weight for contrastive in hybrid
     
     Returns:
         Loss module
@@ -228,5 +329,12 @@ def get_loss_function(
         return ContrastiveLoss(margin=margin)
     elif loss_type == "triplet":
         return TripletLoss(margin=triplet_margin)
+    elif loss_type == "hybrid":
+        return HybridLoss(
+            contrastive_margin=margin,
+            triplet_margin=triplet_margin,
+            alpha=hybrid_alpha,
+            use_hard_negatives=use_hard_negatives,
+        )
     else:
         raise ValueError(f"Unknown loss type: {loss_type}")
